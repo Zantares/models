@@ -9,6 +9,8 @@ rm mpi.log
 export KMP_AFFINITY=granularity=fine,verbose,compact,1,0
 HOSTLIST="$(hostname)"
 SEED=$RANDOM
+export COMPLIANCE_FILE="compliance_raw.log"
+export STITCHED_COMPLIANCE_FILE="compliance_submission.log"
 
 # 20M
 #params=" --no_strategy --train --clean --horovod -synth -md model -hk examplespersecondhook --dataset ml-20m -dd data -te 1 -bs 49152 --layers 256,256,128,64 --num_factors 64 -mts 1000 --inter 1"
@@ -29,6 +31,7 @@ params=" --no_strategy \
          --layers 256,256,128,64 --num_factors 64 \
          --hr_threshold 0.635 \
          --ml_perf \
+         --output_ml_perf_compliance_logging \
          --seed $SEED \
          --inter 1"
 
