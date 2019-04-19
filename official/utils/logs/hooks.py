@@ -125,3 +125,11 @@ class ExamplesPerSecondHook(tf.train.SessionRunHook):
         self._logger.log_metric(
             "current_examples_per_sec", current_examples_per_sec,
             global_step=global_step)
+
+  def end(self, session):
+    average_examples_per_sec = self._batch_size * (
+        self._total_steps / self._step_train_time)
+    print('-----------------------------------------------------------------')
+    print('Batch size: {:d}'.format(self._batch_size))
+    print('{:.2f} samples/sec'.format(average_examples_per_sec))
+    print('-----------------------------------------------------------------')

@@ -29,6 +29,7 @@ import timeit
 import traceback
 import typing
 
+import horovod.tensorflow as hvd
 import numpy as np
 import six
 from six.moves import queue
@@ -79,7 +80,7 @@ class DatasetManager(object):
   management, tf.Dataset creation, etc.).
   """
   def __init__(self, is_training, stream_files, batches_per_epoch,
-               shard_root=None, deterministic=False):
+               shard_root=None, deterministic=False, has_horovod=False):
     # type: (bool, bool, int, typing.Optional[str], bool) -> None
     """Constructs a `DatasetManager` instance.
     Args:
@@ -93,6 +94,7 @@ class DatasetManager(object):
       shard_root: The base directory to be used when stream_files=True.
       deterministic: Forgo non-deterministic speedups. (i.e. sloppy=True)
     """
+    self._has_horovod = has_horovod
     self._is_training = is_training
     self._deterministic = deterministic
     self._stream_files = stream_files
@@ -289,6 +291,9 @@ class DatasetManager(object):
           generator=data_generator, output_types=types,
           output_shapes=shapes)
 
+      if self._is_training and self._has_horovod:
+        dataset = dataset.shard(hvd.size(), hvd.rank())
+
     return dataset.prefetch(16)
 
   def make_input_fn(self, batch_size):
@@ -336,7 +341,8 @@ class BaseDataConstructor(threading.Thread):
                eval_batch_size,         # type: int
                batches_per_eval_step,   # type: int
                stream_files,            # type: bool
-               deterministic=False      # type: bool
+               deterministic=False,     # type: bool
+               has_horovod=False        # type: bool
               ):
     # General constants
     self._maximum_number_epochs = maximum_number_epochs
@@ -387,7 +393,7 @@ class BaseDataConstructor(threading.Thread):
 
     self._train_dataset = DatasetManager(
         True, stream_files, self.train_batches_per_epoch, self._shard_root,
-        deterministic)
+        deterministic, has_horovod)
     self._eval_dataset = DatasetManager(
         False, stream_files, self.eval_batches_per_epoch, self._shard_root,
         deterministic)

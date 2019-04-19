@@ -33,6 +33,7 @@ import signal
 import typing
 
 # pylint: disable=g-bad-import-order
+import horovod.tensorflow as hvd
 import numpy as np
 from absl import app as absl_app
 from absl import flags
@@ -99,10 +100,12 @@ def construct_estimator(model_dir, params):
 
   else:
     distribution = distribution_utils.get_distribution_strategy(
-        num_gpus=params["num_gpus"])
+        num_gpus=params["num_gpus"],
+        turn_off_distribution_strategy=FLAGS.no_strategy)
 
   run_config = tf.estimator.RunConfig(train_distribute=distribution,
-                                      eval_distribute=distribution)
+                                      eval_distribute=distribution,
+                                      session_config=params["session_config"])
 
   model_fn = neumf_model.neumf_model_fn
   if params["use_xla_for_gpu"]:
@@ -151,6 +154,11 @@ def parse_flags(flags_obj):
   eval_batch_size = ((eval_batch_size + eval_divisor - 1) //
                      eval_divisor * eval_divisor // num_devices)
 
+  session_config = tf.ConfigProto(
+      allow_soft_placement=True,
+      inter_op_parallelism_threads=FLAGS.inter_op_parallelism_threads,
+      intra_op_parallelism_threads=FLAGS.intra_op_parallelism_threads)
+
   return {
       "train_epochs": flags_obj.train_epochs,
       "batches_per_step": num_devices,
@@ -174,6 +182,8 @@ def parse_flags(flags_obj):
       "match_mlperf": flags_obj.ml_perf,
       "use_xla_for_gpu": flags_obj.use_xla_for_gpu,
       "epochs_between_evals": FLAGS.epochs_between_evals,
+      "session_config": session_config,
+      "horovod" : FLAGS.horovod
   }
 
 
@@ -186,6 +196,10 @@ def main(_):
 
 def run_ncf(_):
   """Run NCF training and eval loop."""
+  # horovod: initialize
+  if FLAGS.horovod:
+    hvd.init()
+
   if FLAGS.download_if_missing and not FLAGS.use_synthetic_data:
     movielens.download(FLAGS.dataset, FLAGS.data_dir)
 
@@ -205,10 +219,14 @@ def run_ncf(_):
     num_users, num_items, producer = data_preprocessing.instantiate_pipeline(
         dataset=FLAGS.dataset, data_dir=FLAGS.data_dir, params=params,
         constructor_type=FLAGS.constructor_type,
-        deterministic=FLAGS.seed is not None)
+        deterministic=FLAGS.seed is not None,
+        has_horovod=FLAGS.horovod)
 
     num_train_steps = (producer.train_batches_per_epoch //
                        params["batches_per_step"])
+    if FLAGS.horovod:
+      num_train_steps = num_train_steps // hvd.size()
+
     num_eval_steps = (producer.eval_batches_per_epoch //
                       params["batches_per_step"])
     assert not producer.train_batches_per_epoch % params["batches_per_step"]
@@ -216,14 +234,20 @@ def run_ncf(_):
   producer.start()
 
   params["num_users"], params["num_items"] = num_users, num_items
-  model_helpers.apply_clean(flags.FLAGS)
 
+  # horovod: save checkpoints only on rank 0 to prevent other workers from
+  #          corrupting them
+  if FLAGS.horovod:
+    FLAGS.model_dir = FLAGS.model_dir + str(hvd.rank())
+
+  model_helpers.apply_clean(flags.FLAGS)
   estimator = construct_estimator(model_dir=FLAGS.model_dir, params=params)
 
   benchmark_logger, train_hooks = log_and_get_hooks(params["eval_batch_size"])
 
   target_reached = False
   mlperf_helper.ncf_print(key=mlperf_helper.TAGS.TRAIN_LOOP)
+  # with tf.contrib.tfprof.ProfileContext('/home/tenglu/train_dir') as pctx:
   for cycle_index in range(total_training_cycle):
     assert FLAGS.epochs_between_evals == 1 or not mlperf_helper.LOGGER.enabled
     tf.logging.info("Starting a training cycle: {}/{}".format(
@@ -233,8 +257,22 @@ def run_ncf(_):
                             value=cycle_index)
 
     train_input_fn = producer.make_input_fn(is_training=True)
-    estimator.train(input_fn=train_input_fn, hooks=train_hooks,
-                    steps=num_train_steps)
+
+    # horovod: add hook to broadcast variables from rank 0 to all other
+    #          processes during initialization
+    if FLAGS.horovod:
+      train_hooks.append(hvd.BroadcastGlobalVariablesHook(0))
+
+    if FLAGS.max_train_steps != None:
+      estimator.train(input_fn=train_input_fn, hooks=train_hooks,
+                            max_steps=FLAGS.max_train_steps)
+    else:
+      estimator.train(input_fn=train_input_fn, hooks=train_hooks,
+                            steps=num_train_steps)
+
+    # Skip evaluation if FLAGS was set
+    if FLAGS.train:
+      continue
 
     tf.logging.info("Beginning evaluation.")
     eval_input_fn = producer.make_input_fn(is_training=False)
@@ -288,10 +326,10 @@ def define_ncf_flags():
   flags_core.define_base(export_dir=False)
   flags_core.define_performance(
       num_parallel_calls=False,
-      inter_op=False,
-      intra_op=False,
+      inter_op=True,
+      intra_op=True,
       synthetic_data=True,
-      max_train_steps=False,
+      max_train_steps=True,
       dtype=False,
       all_reduce_alg=False
   )
@@ -310,6 +348,18 @@ def define_ncf_flags():
   )
 
   # Add ncf-specific flags
+  flags.DEFINE_boolean(
+      name="horovod", default=False, help=flags_core.help_wrap(
+          "Set it to enable multi-instance mode."))
+
+  flags.DEFINE_boolean(
+      name="train", default=False, help=flags_core.help_wrap(
+          "Set it to disable evaluation after training."))
+
+  flags.DEFINE_boolean(
+      name="no_strategy", default=False, help=flags_core.help_wrap(
+          "Set it to disable any distribution."))
+
   flags.DEFINE_enum(
       name="dataset", default="ml-1m",
       enum_values=["ml-1m", "ml-20m"], case_sensitive=False,

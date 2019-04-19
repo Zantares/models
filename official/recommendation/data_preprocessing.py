@@ -176,7 +176,7 @@ def _filter_index_sort(raw_rating_path, cache_path):
 
 
 def instantiate_pipeline(dataset, data_dir, params, constructor_type=None,
-                         deterministic=False):
+                         deterministic=False, has_horovod=False):
   # type: (str, str, dict, typing.Optional[str], bool) -> (NCFDataset, typing.Callable)
   """Load and digest data CSV into a usable form.
 
@@ -221,7 +221,8 @@ def instantiate_pipeline(dataset, data_dir, params, constructor_type=None,
       eval_batch_size=params["eval_batch_size"],
       batches_per_eval_step=params["batches_per_step"],
       stream_files=params["use_tpu"],
-      deterministic=deterministic
+      deterministic=deterministic,
+      has_horovod=has_horovod
   )
 
   run_time = timeit.default_timer() - st
